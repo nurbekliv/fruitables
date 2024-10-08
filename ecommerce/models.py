@@ -1,7 +1,8 @@
 from django.core.exceptions import ValidationError
-from django.db import models
+from django.db import models, transaction
 from django.utils.text import slugify
 from ckeditor_uploader.fields import RichTextUploadingField
+import uuid
 from django.contrib.auth import get_user_model
 
 User = get_user_model()
@@ -51,6 +52,14 @@ class Product(models.Model):
     def __str__(self):
         return self.name
 
+    def update_rating(self):
+        reviews = Review.objects.filter(product=self)
+        if reviews.exists():
+            self.rating = reviews.aggregate(models.Avg('rating'))['rating__avg']
+        else:
+            self.rating = 0
+        self.save()
+
 
 class PriceHistory(models.Model):
     product = models.ForeignKey(Product, on_delete=models.CASCADE)
@@ -96,6 +105,7 @@ class Review(models.Model):
     def save(self, *args, **kwargs):
         self.full_clean()
         super().save(*args, **kwargs)
+        self.product.update_rating()
 
 
 class LikedReview(models.Model):
@@ -113,7 +123,6 @@ class LikedReview(models.Model):
 
     @classmethod
     def toggle_like(cls, user, review, product):
-        # Foydalanuvchi tomonidan like mavjudligini tekshirish
         liked_review = cls.objects.filter(user=user, review=review, product=product).first()
         if liked_review:
             # Agar like mavjud bo'lsa, uni o'chirish
@@ -125,14 +134,28 @@ class LikedReview(models.Model):
             return True  # Like qo'shildi
 
 
-class ProductSales(models.Model):
-    product = models.ForeignKey(Product, on_delete=models.PROTECT)
+class Order(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(User, on_delete=models.CASCADE)
-    quantity = models.IntegerField()
     created = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        verbose_name_plural = 'solded products'
+        verbose_name_plural = 'orders'
 
     def __str__(self):
-        return f'Solded product by {self.user}'
+        return f'Order by {self.user}'
+
+
+class OrderItem(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    order = models.ForeignKey(Order, on_delete=models.CASCADE)
+    product = models.ForeignKey(Product, on_delete=models.CASCADE)
+    quantity = models.IntegerField()
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name_plural = 'order items'
+
+    def __str__(self):
+        return f'Order item for {self.product.name}'

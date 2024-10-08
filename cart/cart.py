@@ -46,13 +46,13 @@ class Cart:
         cart = self.get_cart_items(request)
 
         # Preload product prices and stock into a dictionary
-        products = {str(product.id): {'price': product.price, 'stock': product.stock} for product in
+        products = {str(product.id): {'price': product.price, 'discount': product.discount} for product in
                     Product.objects.all()}
 
         for product_id, quantity in cart.items():
             if product_id in products:
                 price = products[product_id]['price']
-                stock = products[product_id]['stock']  # Fetch stock
+                stock = products[product_id]['discount']  # Fetch stock
 
                 # Assuming stock holds the discount percentage
                 discount_percentage = Decimal(stock if stock > 0 else 0)  # Ensure it's a Decimal
@@ -83,10 +83,7 @@ class Cart:
 
     def get_quantity(self, request, product_id):
         cart = self.get_cart_items(request)
-        return cart.get(str(product_id), 0)
-
-    from decimal import Decimal, ROUND_DOWN
-    from django.shortcuts import get_object_or_404
+        return cart.get(str(product_id), 1)
 
     def get_total(self, request, product_id):
         cart = self.get_cart_items(request)

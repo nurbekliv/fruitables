@@ -3,14 +3,13 @@ from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
 from rest_framework import status
 from rest_framework.response import Response
-from .models import Review, LikedReview, Category
-from .serializers import ReviewSerializer, ProductSerializer, CategorySerializer
+from .models import Review, LikedReview, Category, ProductImage, OrderItem
+from .serializers import ReviewSerializer, ProductSerializer, CategorySerializer, ProductImageSerializer
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.views import APIView
 from .models import Product
-from ecommerce.models import ProductSales
 from .permissions import IsOwnerOrReadOnly, PurchasePermission
 
 
@@ -96,9 +95,9 @@ def post_reviews(request):
 )
 @api_view(['PUT'])
 @permission_classes([IsAuthenticated, IsOwnerOrReadOnly])
-def put_reviews(request, pk):
+def put_reviews(request, product_id):
     try:
-        review = Review.objects.get(pk=pk)
+        review = Review.objects.get(pk=product_id)
     except Review.DoesNotExist:
         return Response(status=status.HTTP_404_NOT_FOUND)
 
@@ -127,69 +126,48 @@ def delete_reviews(request, pk):
         return Response(status=status.HTTP_404_NOT_FOUND)
 
 
-class BestSellerView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    @swagger_auto_schema(tags=['product'])
-    def get(self, request):
-        best_seller = ProductSales.objects.values('product') \
-                          .annotate(total_sold=Sum('quantity')) \
-                          .order_by('-total_sold')[:10]
-
-        best_seller_products = []
-        for item in best_seller:
-            try:
-                product = Product.objects.get(id=item['product'])
-                best_seller_products.append({
-                    'product_id': product.id,
-                    'product_name': product.name,
-                    'total_sold': item['total_sold']
-                })
-            except Product.DoesNotExist:
-                continue
-
-        return Response({'best_seller_products': best_seller_products})
-
-
 class DiscountView(APIView):
     permission_classes = [IsAuthenticated]
 
     @swagger_auto_schema(tags=['product'])
     def get(self, request):
         products = Product.objects.filter(discount__gt=0)
-        serializer = ProductSerializer(products, many=True)
-        return Response(serializer.data)
+        product_data = []
+
+        for product in products:
+            product_images = ProductImage.objects.filter(product_id=product.id)
+            images_data = ProductImageSerializer(product_images, many=True).data
+
+            product_data.append({
+                'product_id': product.id,
+                'product_name': product.name,
+                'discount': product.discount,
+                'images': images_data,  # Rasmlarni qo'shamiz
+            })
+
+        return Response(product_data)
 
 
-class LastJoindedProductView(APIView):
+class LastJoinedProductView(APIView):
     permission_classes = [IsAuthenticated]
 
     @swagger_auto_schema(tags=['product'])
     def get(self, request):
         products = Product.objects.order_by('-created')[:10]
-        serializer = ProductSerializer(products, many=True)
-        return Response(serializer.data)
+        product_data = []
 
+        for product in products:
+            product_images = ProductImage.objects.filter(product_id=product.id)
+            images_data = ProductImageSerializer(product_images, many=True).data
 
-class BuyProductView(APIView):
-    permission_classes = [IsAuthenticated]
+            product_data.append({
+                'product_id': product.id,
+                'product_name': product.name,
+                'created': product.created,
+                'images': images_data,  # Rasmlarni qo'shamiz
+            })
 
-    @swagger_auto_schema(tags=['product'], request_body=openapi.Schema(type=openapi.TYPE_OBJECT, properties={
-        'product_id': openapi.Schema(type=openapi.TYPE_INTEGER, description='Product ID'),
-        'quantity': openapi.Schema(type=openapi.TYPE_INTEGER, description='Product quantity')
-    }))
-    def post(self, request):
-        product_id = request.data.get('product_id')
-        quantity = request.data.get('quantity')
-        if product_id and quantity:
-            try:
-                product = Product.objects.get(id=product_id)
-                ProductSales.objects.create(user=request.user, product=product, quantity=quantity)
-                return Response({'message': 'Product bought successfully'}, status=status.HTTP_200_OK)
-            except Product.DoesNotExist:
-                return Response({'error': 'Product not found'}, status=status.HTTP_404_NOT_FOUND)
-        else:
-            return Response({'error': 'Product ID and quantity are required'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(product_data)
 
 
 class AddToLikedView(APIView):
@@ -232,12 +210,22 @@ class ProductDetailView(APIView):
     def get(self, request, slug):
         try:
             product = Product.objects.get(slug=slug)
+            if product.views is None:
+                product.views = 0
             product.views += 1
             product.save()
-            serializer = ProductSerializer(product)
-            return Response(serializer.data, status=status.HTTP_200_OK)
+
+            product_images = ProductImage.objects.filter(product_id=product.id)
+            product_data = ProductSerializer(product).data
+            product_data['images'] = ProductImageSerializer(product_images, many=True).data
+
+            return Response(product_data, status=status.HTTP_200_OK)
+
         except Product.DoesNotExist:
             return Response({'error': 'Product not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class ProductFilterView(APIView):
@@ -254,10 +242,22 @@ class ProductFilterView(APIView):
     def get(self, request):
         category = request.GET.get('category')
         products = Product.objects.filter(category__name=category)
+
         if products.count() == 0:
             return Response({'message': 'Bu kategoriyada mahsulot yo\'q'}, status=status.HTTP_404_NOT_FOUND)
-        serializer = ProductSerializer(products, many=True)
-        return Response(serializer.data)
+
+        product_data = []
+        for product in products:
+            product_images = ProductImage.objects.filter(product_id=product.id)
+            images_data = ProductImageSerializer(product_images, many=True).data
+
+            product_data.append({
+                'product_id': product.id,
+                'product_name': product.name,
+                'images': images_data,
+            })
+
+        return Response(product_data)
 
 
 class CategoryListView(APIView):
@@ -277,7 +277,50 @@ class RecommendedProductsView(APIView):
     def get(self, request):
         categories = ['top', 'apple', 'rolex', 'daily']
         filtered_products = {}
+
         for category in categories:
-            filtered_products[category] = Product.objects.filter(category__name=category)[:8]
+            products = Product.objects.filter(category__name=category)[:8]
+            product_data = []
+
+            for product in products:
+                product_images = ProductImage.objects.filter(product_id=product.id)
+                images_data = ProductImageSerializer(product_images, many=True).data
+
+                product_data.append({
+                    'product_id': product.id,
+                    'product_name': product.name,
+                    'images': images_data,
+                })
+
+            filtered_products[category] = product_data
 
         return Response(filtered_products)
+
+
+class BestSellerAPIView(APIView):
+    def get(self, request):
+        # Eng ko'p odam sotib olgan mahsulotlarni hisoblash
+        best_sellers = (
+            OrderItem.objects
+            .values('product_id')
+            .annotate(total_orders=Count('order__user', distinct=True))
+            .order_by('-total_orders', '-quantity')[:10]
+        )
+
+        # Mahsulotlarni olish
+        product_ids = [item['product_id'] for item in best_sellers]
+        products = Product.objects.filter(id__in=product_ids)
+
+        # Mahsulotlar va buyurtma sonini serializatsiya qilish
+        serialized_products = ProductSerializer(products, many=True).data
+
+        # Natijani birlashtirish
+        result = [
+            {
+                'product': serialized_product,
+                'total_orders': next(item['total_orders'] for item in best_sellers if item['product_id'] == serialized_product['id'])
+            }
+            for serialized_product in serialized_products
+        ]
+
+        return Response(result, status=status.HTTP_200_OK)

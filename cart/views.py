@@ -2,17 +2,20 @@ from django.shortcuts import get_object_or_404
 from drf_yasg import openapi
 from drf_yasg.utils import swagger_auto_schema
 from rest_framework.permissions import IsAuthenticated
+
+from ecommerce.serializers import OrderSerializer
 from .cart import Cart
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework import status
-from ecommerce.models import Product
+from rest_framework import status, generics, permissions
+from ecommerce.models import Product, Order, OrderItem
 from .serializers import PaymentSerializer
 import stripe
-from django.conf import settings
 from rest_framework.decorators import api_view
 from .models import ShippingInfo
 from .serializers import ShippingInfoSerializer
+from django.conf import settings
+from ecommerce.models import ProductImage
 from django.contrib.auth import get_user_model
 
 User = get_user_model()
@@ -27,8 +30,10 @@ class CartView(APIView):
         cart_len = cart.cart_len(request)
         keys = cart.get_product_keys(request)
         individual_price = {}
+        product_image = {}
         for key in keys:
             individual_price[key] = cart.get_total(request, key)
+            product_image[key] = ProductImage.objects.filter(product_id=key).first()
         cart = cart.get_cart_items(request)
         if cart_len == 0:
             return Response({'message': 'Savatcha bo\'sh'}, status=status.HTTP_200_OK)
@@ -36,7 +41,8 @@ class CartView(APIView):
             'cart': cart,
             'cart_len': cart_len,
             'total_price': total_price,
-            'individual_price': individual_price
+            'individual_price': individual_price,
+            'product_image': product_image
         })
 
 
@@ -85,7 +91,7 @@ class QuantityView(APIView):
         ),
         operation_summary="Mahsulot miqdorini o'zgartirish/action formda keladi"
     )
-    def post(self, request, product_id):
+    def patch(self, request, product_id):
         cart = Cart(request)
         product = get_object_or_404(Product, id=product_id)
 
@@ -102,7 +108,6 @@ class QuantityView(APIView):
         total_price = cart.get_total_price(request)
         cart_len = cart.cart_len(request)
         individual_prices = {key: cart.get_total(request, key) for key in cart.get_product_keys(request)}
-
         return Response({
             'success': True,
             'total_price': total_price,
@@ -112,31 +117,6 @@ class QuantityView(APIView):
 
 
 stripe.api_key = settings.STRIPE_TEST_SECRET_KEY
-
-
-@swagger_auto_schema(method='post', request_body=PaymentSerializer)
-@api_view(['POST'])
-def create_payment(request):
-    serializer = PaymentSerializer(data=request.data)
-
-    if serializer.is_valid():
-        amount = serializer.validated_data['amount']
-        currency = serializer.validated_data.get('currency', 'usd')
-        token = serializer.validated_data['token']
-
-        try:
-            charge = stripe.Charge.create(
-                amount=amount,
-                currency=currency,
-                source=token,
-                description='Payment Charge'
-            )
-            return Response({'status': 'success', 'charge': charge}, status=status.HTTP_200_OK)
-
-        except stripe.error.StripeError as e:
-            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 class ShippingInfoView(APIView):
@@ -171,3 +151,67 @@ class ShippingInfoView(APIView):
             return Response(serializer.data, status=status.HTTP_201_CREATED)
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@swagger_auto_schema(method='post', request_body=PaymentSerializer)
+@api_view(['POST'])
+def create_payment(request):
+    serializer = PaymentSerializer(data=request.data)
+
+    if serializer.is_valid():
+        amount = serializer.validated_data['amount'] * 100  # Amount centlarda bo'lishi kerak
+        currency = serializer.validated_data.get('currency', 'usd')
+        token = serializer.validated_data['token']
+
+        try:
+            charge = stripe.Charge.create(
+                amount=amount,
+                currency=currency,
+                source=token,
+                description='Payment Charge'
+            )
+            return Response({'status': 'success', 'charge': charge}, status=status.HTTP_200_OK)
+
+        except stripe.error.CardError as e:
+            return Response({'error': 'Card was declined'}, status=status.HTTP_402_PAYMENT_REQUIRED)
+
+        except stripe.error.RateLimitError as e:
+            return Response({'error': 'Rate limit error, try again later'}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+        except stripe.error.InvalidRequestError as e:
+            return Response({'error': 'Invalid parameters'}, status=status.HTTP_400_BAD_REQUEST)
+
+        except stripe.error.AuthenticationError as e:
+            return Response({'error': 'Authentication with Stripe failed'}, status=status.HTTP_403_FORBIDDEN)
+
+        except stripe.error.APIConnectionError as e:
+            return Response({'error': 'Network communication with Stripe failed'},
+                            status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        except stripe.error.StripeError as e:
+            return Response({'error': 'Stripe error, try again later'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class OrderCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @swagger_auto_schema(
+        request_body=OrderSerializer,
+        responses={201: OrderSerializer, 400: 'Bad Request'}
+    )
+    def post(self, request, *args, **kwargs):
+        serializer = OrderSerializer(data=request.data)
+
+        if serializer.is_valid():
+            order = serializer.save(user=request.user)
+            # Order obyekti uchun serializers yaratish
+            return Response({
+                'order_id': str(order.id),  # Yaratilgan order ID sini qaytaramiz
+                'user': str(order.user),  # Yaratilgan order foydalanuvchisi
+                'items': serializer.validated_data['items']  # Yaratilgan orderdagi buyurtmalar
+            }, status=status.HTTP_201_CREATED)
+
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
